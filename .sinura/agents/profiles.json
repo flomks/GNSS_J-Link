@@ -1,0 +1,54 @@
+[
+  {
+    "id": "profile-codex",
+    "name": "Codex",
+    "agent": "codex",
+    "command": "",
+    "roleHint": "General coding agent",
+    "preferredRoles": [],
+    "skills": [
+      {
+        "id": "skill-2a432f83-8189-4a74-9a59-e2f872377dec",
+        "name": "New Skill",
+        "source": "local skill",
+        "status": "available",
+        "scope": "workspace",
+        "notes": ""
+      }
+    ],
+    "plugins": []
+  },
+  {
+    "id": "profile-claude-review",
+    "name": "Claude Review",
+    "agent": "codex",
+    "command": "",
+    "roleHint": "Review and planning",
+    "preferredRoles": [],
+    "skills": [],
+    "plugins": []
+  },
+  {
+    "id": "profile-console",
+    "name": "Console",
+    "agent": "console",
+    "command": "",
+    "roleHint": "Manual shell",
+    "preferredRoles": [],
+    "skills": [],
+    "plugins": []
+  },
+  {
+    "id": "profile-c146888f-4c5c-4c89-ab4f-e115f6f2af68",
+    "name": "Custom Agent",
+    "agent": "cursor",
+    "command": "codex",
+    "roleHint": "Custom CLI agent",
+    "preferredRoles": [
+      "coder",
+      "fixer"
+    ],
+    "skills": [],
+    "plugins": []
+  }
+]

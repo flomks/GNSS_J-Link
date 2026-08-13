@@ -48,8 +48,19 @@ typedef struct
     /** 1 once RMC has reported status 'A' (valid navigation data). */
     uint8_t data_valid;
 
-    /** 1 once a position has been decoded at least once. */
+    /** 1 if the latest GGA/RMC reports a complete, currently valid position. */
     uint8_t position_valid;
+
+    /** 1 once a syntactically valid UTC time has been decoded. */
+    uint8_t time_valid;
+
+    /** 1 once RMC has supplied a syntactically valid date. */
+    uint8_t date_valid;
+
+    /** Validity flags for optional measurements. */
+    uint8_t altitude_valid;
+    uint8_t speed_valid;
+    uint8_t course_valid;
 
     /** NMEA_FIX_NONE / NMEA_FIX_2D / NMEA_FIX_3D, from GSA. */
     uint8_t fix_type;
@@ -79,6 +90,17 @@ typedef struct
     uint8_t utc_hour;
     uint8_t utc_minute;
     uint8_t utc_second;
+
+    /** UTC date from RMC. Years 80..99 map to 1980..1999, others to 2000+. */
+    uint8_t utc_day;
+    uint8_t utc_month;
+    uint16_t utc_year;
+
+    /** Speed over ground in km/h x1000 (12345 == 12.345 km/h). */
+    uint32_t speed_kmh_milli;
+
+    /** Course over ground in degrees x1000 (271250 == 271.250 degrees). */
+    uint32_t course_mdeg;
 
     /** Sentences successfully decoded. */
     uint32_t sentences_parsed;

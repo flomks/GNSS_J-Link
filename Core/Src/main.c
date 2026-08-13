@@ -36,20 +36,21 @@
 /* USER CODE BEGIN PD */
 
 /*
- * ---------------------------------------------------------------------
- * Output switches -- comment a line out to silence that part of the log.
- * ---------------------------------------------------------------------
- * Both are independent. Turning APP_SHOW_RAW_SENTENCES off is the usual
- * choice once the link works, because the raw dump is what drowns the
- * decoded status line. Turning APP_SHOW_DECODED_STATUS off gets you the
- * previous behaviour back.
+ * Select exactly one GNSS output mode here:
+ *   APP_GNSS_OUTPUT_PARSED  readable status once per second
+ *   APP_GNSS_OUTPUT_RAW     every NMEA sentence as received
  */
+#define APP_GNSS_OUTPUT_RAW     1u
+#define APP_GNSS_OUTPUT_PARSED  2u
 
-/** Dump every received NMEA sentence verbatim ("GNSS> $GPGGA,..."). */
-#define APP_SHOW_RAW_SENTENCES
+#ifndef APP_GNSS_OUTPUT_MODE
+#define APP_GNSS_OUTPUT_MODE APP_GNSS_OUTPUT_PARSED
+#endif
 
-/** Print the decoded fix/satellites/position line once per second. */
-#define APP_SHOW_DECODED_STATUS
+#if ((APP_GNSS_OUTPUT_MODE != APP_GNSS_OUTPUT_RAW) && \
+     (APP_GNSS_OUTPUT_MODE != APP_GNSS_OUTPUT_PARSED))
+#error "APP_GNSS_OUTPUT_MODE must be RAW or PARSED"
+#endif
 
 /* USER CODE END PD */
 
@@ -62,11 +63,13 @@
 
 /* USER CODE BEGIN PV */
 
-/* Timestamp of the last heartbeat line */
+#if (APP_GNSS_OUTPUT_MODE == APP_GNSS_OUTPUT_PARSED)
+/* Timestamp of the last heartbeat line. */
 static uint32_t last_heartbeat_time = 0;
 
-/* Navigation state accumulated from the incoming sentences */
+/* Navigation state accumulated from the incoming sentences. */
 static NMEA_Data nmea_data;
+#endif
 
 /* USER CODE END PV */
 
@@ -78,9 +81,10 @@ static void MPU_Config(void);
 
 static void GNSS_OnSentence(const char *sentence);
 
-#ifdef APP_SHOW_DECODED_STATUS
+#if (APP_GNSS_OUTPUT_MODE == APP_GNSS_OUTPUT_PARSED)
 static void App_PrintCoordinate(int32_t micro_degrees, char positive, char negative);
-static void App_PrintDecodedStatus(void);
+static void App_PrintAltitude(int32_t decimetres);
+static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now);
 #endif
 
 /* USER CODE END PFP */
@@ -96,22 +100,15 @@ static void App_PrintDecodedStatus(void);
  */
 static void GNSS_OnSentence(const char *sentence)
 {
-#ifdef APP_SHOW_RAW_SENTENCES
-    SEGGER_RTT_WriteString(0, "GNSS> ");
+#if (APP_GNSS_OUTPUT_MODE == APP_GNSS_OUTPUT_RAW)
     SEGGER_RTT_WriteString(0, sentence);
     SEGGER_RTT_WriteString(0, "\r\n");
-#endif
-
-#ifdef APP_SHOW_DECODED_STATUS
+#else
     NMEA_Parse(&nmea_data, sentence);
-#endif
-
-#if !defined(APP_SHOW_RAW_SENTENCES) && !defined(APP_SHOW_DECODED_STATUS)
-    (void)sentence;
 #endif
 }
 
-#ifdef APP_SHOW_DECODED_STATUS
+#if (APP_GNSS_OUTPUT_MODE == APP_GNSS_OUTPUT_PARSED)
 
 /**
  * @brief Prints micro-degrees as "48.117300 N".
@@ -145,74 +142,197 @@ static void App_PrintCoordinate(int32_t micro_degrees, char positive, char negat
     );
 }
 
+/** Prints a signed decimetre value without relying on printf float support. */
+static void App_PrintAltitude(int32_t decimetres)
+{
+    uint32_t magnitude;
+
+    if (decimetres < 0)
+    {
+        SEGGER_RTT_WriteString(0, "-");
+        magnitude = (uint32_t)(-(decimetres + 1)) + 1u;
+    }
+    else
+    {
+        magnitude = (uint32_t)decimetres;
+    }
+
+    SEGGER_RTT_printf(
+        0, "%u.%u m",
+        (unsigned)(magnitude / 10u),
+        (unsigned)(magnitude % 10u)
+    );
+}
+
 /**
- * @brief Prints the decoded navigation state as one line.
- *
- * Position and altitude are only shown once a fix actually exists --
- * printing stale zeros would look like a valid position at Null Island.
+ * @brief Prints receiver diagnostics and decoded navigation data as a table.
  */
-static void App_PrintDecodedStatus(void)
+static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
 {
     const char *fix_text;
+    const char *quality_text;
+    const char *nmea_text;
 
-    switch (nmea_data.fix_type)
+    if (nmea_data.position_valid == 0u)
     {
-        case NMEA_FIX_2D: fix_text = "2D";   break;
-        case NMEA_FIX_3D: fix_text = "3D";   break;
-        default:          fix_text = "none"; break;
+        fix_text = "none";
+    }
+    else
+    {
+        switch (nmea_data.fix_type)
+        {
+            case NMEA_FIX_2D: fix_text = "2D";    break;
+            case NMEA_FIX_3D: fix_text = "3D";    break;
+            default:          fix_text = "valid"; break;
+        }
+    }
+
+    switch (nmea_data.fix_quality)
+    {
+        case 1u: quality_text = "GPS";       break;
+        case 2u: quality_text = "DGPS";      break;
+        case 4u: quality_text = "RTK fixed"; break;
+        case 5u: quality_text = "RTK float"; break;
+        case 6u: quality_text = "estimated"; break;
+        default: quality_text = "invalid";   break;
+    }
+
+    if ((now - status->last_byte_tick) >= 3000u)
+    {
+        nmea_text = "KEINE DATEN";
+    }
+    else if ((now - status->last_sentence_tick) >= 3000u)
+    {
+        nmea_text = "Bytes, aber keine Saetze";
+    }
+    else
+    {
+        nmea_text = "OK";
     }
 
     SEGGER_RTT_printf(
         0,
-        "[GNSS] fix=%s | sats=%u/%u | hdop=%u.%03u",
-        fix_text,
-        (unsigned)nmea_data.satellites_used,
-        (unsigned)nmea_data.satellites_visible,
-        (unsigned)(nmea_data.hdop_milli / 1000u),
-        (unsigned)(nmea_data.hdop_milli % 1000u)
+        "\r\n--------------------------------------------------\r\n"
+        "[LIVE] STM32 laeuft | %u s\r\n"
+        "UART        : %u Baud | Fehler: %u | Overflow: %u\r\n"
+        "NMEA        : %s | Saetze: %u | CRC-Fehler: %u\r\n",
+        (unsigned)(now / 1000u),
+        (unsigned)huart1.Init.BaudRate,
+        (unsigned)status->uart_errors,
+        (unsigned)status->ring_overflows,
+        nmea_text,
+        (unsigned)status->sentences_received,
+        (unsigned)nmea_data.checksum_errors
     );
 
-    if ((nmea_data.position_valid != 0u) && (nmea_data.fix_type >= NMEA_FIX_2D))
+    if (nmea_data.position_valid != 0u)
     {
-        SEGGER_RTT_WriteString(0, " | ");
+        SEGGER_RTT_printf(0, "Fix         : JA (%s, %s)\r\n", fix_text, quality_text);
+    }
+    else
+    {
+        SEGGER_RTT_WriteString(0, "Fix         : NEIN\r\n");
+    }
+
+    SEGGER_RTT_printf(
+        0,
+        "Satelliten  : %u genutzt | %u sichtbar\r\n",
+        (unsigned)nmea_data.satellites_used,
+        (unsigned)nmea_data.satellites_visible
+    );
+
+    SEGGER_RTT_WriteString(0, "Position     : ");
+    if (nmea_data.position_valid != 0u)
+    {
         App_PrintCoordinate(nmea_data.latitude_udeg, 'N', 'S');
-
-        SEGGER_RTT_WriteString(0, " ");
+        SEGGER_RTT_WriteString(0, ", ");
         App_PrintCoordinate(nmea_data.longitude_udeg, 'E', 'W');
+        SEGGER_RTT_WriteString(0, "\r\n");
+    }
+    else
+    {
+        SEGGER_RTT_WriteString(0, "noch nicht verfuegbar\r\n");
+    }
 
+    SEGGER_RTT_WriteString(0, "Hoehe        : ");
+    if (nmea_data.altitude_valid != 0u)
+    {
+        App_PrintAltitude(nmea_data.altitude_dm);
+        SEGGER_RTT_WriteString(0, "\r\n");
+    }
+    else
+    {
+        SEGGER_RTT_WriteString(0, "nicht verfuegbar\r\n");
+    }
+
+    SEGGER_RTT_printf(
+        0, "HDOP         : %u.%02u\r\n",
+        (unsigned)(nmea_data.hdop_milli / 1000u),
+        (unsigned)((nmea_data.hdop_milli % 1000u) / 10u)
+    );
+
+    SEGGER_RTT_WriteString(0, "Geschw.      : ");
+    if (nmea_data.speed_valid != 0u)
+    {
         SEGGER_RTT_printf(
-            0,
-            " | alt=%d.%u m",
-            (int)(nmea_data.altitude_dm / 10),
-            (unsigned)((nmea_data.altitude_dm < 0 ?
-                        -nmea_data.altitude_dm : nmea_data.altitude_dm) % 10)
+            0, "%u.%02u km/h\r\n",
+            (unsigned)(nmea_data.speed_kmh_milli / 1000u),
+            (unsigned)((nmea_data.speed_kmh_milli % 1000u) / 10u)
         );
     }
     else
     {
-        SEGGER_RTT_WriteString(0, " | no position yet");
+        SEGGER_RTT_WriteString(0, "nicht verfuegbar\r\n");
     }
 
-    SEGGER_RTT_printf(
-        0,
-        " | %02u:%02u:%02u UTC%s\r\n",
-        (unsigned)nmea_data.utc_hour,
-        (unsigned)nmea_data.utc_minute,
-        (unsigned)nmea_data.utc_second,
-        (nmea_data.data_valid != 0u) ? "" : " (not valid)"
-    );
-
-    if (nmea_data.checksum_errors != 0u)
+    SEGGER_RTT_WriteString(0, "Kurs         : ");
+    if (nmea_data.course_valid != 0u)
     {
         SEGGER_RTT_printf(
-            0,
-            "[GNSS] checksum errors: %u\r\n",
-            (unsigned)nmea_data.checksum_errors
+            0, "%u.%02u Grad\r\n",
+            (unsigned)(nmea_data.course_mdeg / 1000u),
+            (unsigned)((nmea_data.course_mdeg % 1000u) / 10u)
         );
     }
+    else
+    {
+        SEGGER_RTT_WriteString(0, "nicht verfuegbar\r\n");
+    }
+
+    SEGGER_RTT_WriteString(0, "UTC          : ");
+    if (nmea_data.time_valid != 0u)
+    {
+        SEGGER_RTT_printf(
+            0, "%02u:%02u:%02u UTC\r\n",
+            (unsigned)nmea_data.utc_hour,
+            (unsigned)nmea_data.utc_minute,
+            (unsigned)nmea_data.utc_second
+        );
+    }
+    else
+    {
+        SEGGER_RTT_WriteString(0, "--:--:-- UTC\r\n");
+    }
+
+    SEGGER_RTT_WriteString(0, "Datum        : ");
+    if (nmea_data.date_valid != 0u)
+    {
+        SEGGER_RTT_printf(
+            0, "%02u.%02u.%04u\r\n",
+            (unsigned)nmea_data.utc_day,
+            (unsigned)nmea_data.utc_month,
+            (unsigned)nmea_data.utc_year
+        );
+    }
+    else
+    {
+        SEGGER_RTT_WriteString(0, "--.--.----\r\n");
+    }
+
+    SEGGER_RTT_WriteString(0, "--------------------------------------------------\r\n");
 }
 
-#endif /* APP_SHOW_DECODED_STATUS */
+#endif /* APP_GNSS_OUTPUT_MODE == APP_GNSS_OUTPUT_PARSED */
 
 /* USER CODE END 0 */
 
@@ -284,9 +404,10 @@ int main(void)
       "\r\n"
   );
 
+#if (APP_GNSS_OUTPUT_MODE == APP_GNSS_OUTPUT_PARSED)
   last_heartbeat_time = HAL_GetTick();
-
   NMEA_Reset(&nmea_data);
+#endif
 
   /*
    * Arm reception. From here on the USART1 interrupt fills the receive
@@ -313,7 +434,8 @@ int main(void)
      */
     GNSS_Poll();
 
-    /* Heartbeat, once per second. */
+#if (APP_GNSS_OUTPUT_MODE == APP_GNSS_OUTPUT_PARSED)
+    /* Receiver diagnostics and decoded state, once per second. */
     uint32_t now = HAL_GetTick();
 
     if ((now - last_heartbeat_time) >= 1000u)
@@ -323,45 +445,9 @@ int main(void)
         last_heartbeat_time = now;
         GNSS_GetStatus(&status);
 
-        SEGGER_RTT_printf(
-            0,
-            "[LIVE %u ms] bytes=%u | nmea=%u | uart-err=%u | overflow=%u",
-            (unsigned)now,
-            (unsigned)status.bytes_received,
-            (unsigned)status.sentences_received,
-            (unsigned)status.uart_errors,
-            (unsigned)status.ring_overflows
-        );
-
-        if ((now - status.last_byte_tick) >= 3000u)
-        {
-            /* Nothing at all on the wire for three seconds. */
-            SEGGER_RTT_WriteString(0, " | GNSS: NO DATA");
-        }
-        else if ((now - status.last_sentence_tick) >= 3000u)
-        {
-            /*
-             * Bytes arrive but never parse. Usually one of:
-             * wrong baud rate, a binary protocol, or a UART misconfig.
-             * The raw byte is the most useful clue here.
-             */
-            SEGGER_RTT_printf(
-                0,
-                " | GNSS: bytes but no NMEA | last=0x%02X",
-                (unsigned)status.last_byte
-            );
-        }
-        else
-        {
-            SEGGER_RTT_WriteString(0, " | GNSS: OK");
-        }
-
-        SEGGER_RTT_WriteString(0, "\r\n");
-
-#ifdef APP_SHOW_DECODED_STATUS
-        App_PrintDecodedStatus();
-#endif
+        App_PrintDecodedStatus(&status, now);
     }
+#endif
 
   }
   /* USER CODE END 3 */

@@ -23,9 +23,15 @@
 static int      NMEA_ChecksumOk(const char *sentence);
 static int      NMEA_Field(const char *sentence, uint8_t index,
                            char *buf, uint8_t buflen);
+static int      NMEA_IsUnsignedDecimal(const char *text);
 static uint32_t NMEA_Scaled(const char *text, uint8_t decimals);
-static int32_t  NMEA_Coordinate(const char *value, char hemisphere);
-static void     NMEA_ApplyTime(NMEA_Data *data, const char *text);
+static int      NMEA_Coordinate(const char *value, char hemisphere,
+                                uint16_t maximum_degrees, int32_t *result);
+static int      NMEA_ApplyPosition(NMEA_Data *data, const char *sentence,
+                                   uint8_t latitude_field,
+                                   uint8_t longitude_field);
+static int      NMEA_ApplyTime(NMEA_Data *data, const char *text);
+static int      NMEA_ApplyDate(NMEA_Data *data, const char *text);
 
 /* Public functions ----------------------------------------------------------*/
 
@@ -38,6 +44,11 @@ void NMEA_Reset(NMEA_Data *data)
 
     data->data_valid = 0u;
     data->position_valid = 0u;
+    data->time_valid = 0u;
+    data->date_valid = 0u;
+    data->altitude_valid = 0u;
+    data->speed_valid = 0u;
+    data->course_valid = 0u;
     data->fix_type = NMEA_FIX_NONE;
     data->fix_quality = 0u;
     data->satellites_used = 0u;
@@ -49,6 +60,11 @@ void NMEA_Reset(NMEA_Data *data)
     data->utc_hour = 0u;
     data->utc_minute = 0u;
     data->utc_second = 0u;
+    data->utc_day = 0u;
+    data->utc_month = 0u;
+    data->utc_year = 0u;
+    data->speed_kmh_milli = 0u;
+    data->course_mdeg = 0u;
     data->sentences_parsed = 0u;
     data->checksum_errors = 0u;
     data->sentences_ignored = 0u;
@@ -57,7 +73,6 @@ void NMEA_Reset(NMEA_Data *data)
 int NMEA_Parse(NMEA_Data *data, const char *sentence)
 {
     char field[NMEA_FIELD_MAX];
-    char hemisphere[NMEA_FIELD_MAX];
     const char *type;
 
     if ((data == NULL) || (sentence == NULL) || (sentence[0] != '$'))
@@ -97,23 +112,16 @@ int NMEA_Parse(NMEA_Data *data, const char *sentence)
             NMEA_ApplyTime(data, field);
         }
 
-        if (NMEA_Field(sentence, 2u, field, NMEA_FIELD_MAX) &&
-            NMEA_Field(sentence, 3u, hemisphere, NMEA_FIELD_MAX))
-        {
-            data->latitude_udeg = NMEA_Coordinate(field, hemisphere[0]);
-            data->position_valid = 1u;
-        }
-
-        if (NMEA_Field(sentence, 4u, field, NMEA_FIELD_MAX) &&
-            NMEA_Field(sentence, 5u, hemisphere, NMEA_FIELD_MAX))
-        {
-            data->longitude_udeg = NMEA_Coordinate(field, hemisphere[0]);
-        }
-
-        if (NMEA_Field(sentence, 6u, field, NMEA_FIELD_MAX))
+        data->fix_quality = 0u;
+        if (NMEA_Field(sentence, 6u, field, NMEA_FIELD_MAX) &&
+            NMEA_IsUnsignedDecimal(field))
         {
             data->fix_quality = (uint8_t)NMEA_Scaled(field, 0u);
         }
+
+        data->position_valid =
+            ((data->fix_quality != 0u) &&
+             NMEA_ApplyPosition(data, sentence, 2u, 4u)) ? 1u : 0u;
 
         if (NMEA_Field(sentence, 7u, field, NMEA_FIELD_MAX))
         {
@@ -125,12 +133,18 @@ int NMEA_Parse(NMEA_Data *data, const char *sentence)
             data->hdop_milli = (uint16_t)NMEA_Scaled(field, 3u);
         }
 
-        if (NMEA_Field(sentence, 9u, field, NMEA_FIELD_MAX))
+        if (NMEA_Field(sentence, 9u, field, NMEA_FIELD_MAX) &&
+            NMEA_IsUnsignedDecimal((field[0] == '-') ? &field[1] : field))
         {
             int32_t altitude = (int32_t)NMEA_Scaled(
                 (field[0] == '-') ? &field[1] : field, 1u);
 
             data->altitude_dm = (field[0] == '-') ? -altitude : altitude;
+            data->altitude_valid = 1u;
+        }
+        else
+        {
+            data->altitude_valid = 0u;
         }
 
         data->sentences_parsed++;
@@ -142,6 +156,7 @@ int NMEA_Parse(NMEA_Data *data, const char *sentence)
     /* ---------------------------------------------------------------- */
     if ((type[0] == 'G') && (type[1] == 'S') && (type[2] == 'A'))
     {
+        data->data_valid = 0u;
         if (NMEA_Field(sentence, 2u, field, NMEA_FIELD_MAX))
         {
             data->fix_type = (uint8_t)NMEA_Scaled(field, 0u);
@@ -182,17 +197,39 @@ int NMEA_Parse(NMEA_Data *data, const char *sentence)
             data->data_valid = (field[0] == 'A') ? 1u : 0u;
         }
 
-        if (NMEA_Field(sentence, 3u, field, NMEA_FIELD_MAX) &&
-            NMEA_Field(sentence, 4u, hemisphere, NMEA_FIELD_MAX))
+        data->position_valid =
+            ((data->data_valid != 0u) &&
+             NMEA_ApplyPosition(data, sentence, 3u, 5u)) ? 1u : 0u;
+
+        /* RMC speed is knots. 1 knot is exactly 1.852 km/h. */
+        if ((data->data_valid != 0u) &&
+            NMEA_Field(sentence, 7u, field, NMEA_FIELD_MAX) &&
+            NMEA_IsUnsignedDecimal(field))
         {
-            data->latitude_udeg = NMEA_Coordinate(field, hemisphere[0]);
-            data->position_valid = 1u;
+            uint32_t knots_milli = NMEA_Scaled(field, 3u);
+            data->speed_kmh_milli = (knots_milli * 1852u) / 1000u;
+            data->speed_valid = 1u;
+        }
+        else
+        {
+            data->speed_valid = 0u;
         }
 
-        if (NMEA_Field(sentence, 5u, field, NMEA_FIELD_MAX) &&
-            NMEA_Field(sentence, 6u, hemisphere, NMEA_FIELD_MAX))
+        if ((data->data_valid != 0u) &&
+            NMEA_Field(sentence, 8u, field, NMEA_FIELD_MAX) &&
+            NMEA_IsUnsignedDecimal(field))
         {
-            data->longitude_udeg = NMEA_Coordinate(field, hemisphere[0]);
+            data->course_mdeg = NMEA_Scaled(field, 3u);
+            data->course_valid = 1u;
+        }
+        else
+        {
+            data->course_valid = 0u;
+        }
+
+        if (NMEA_Field(sentence, 9u, field, NMEA_FIELD_MAX))
+        {
+            data->date_valid = NMEA_ApplyDate(data, field) ? 1u : 0u;
         }
 
         data->sentences_parsed++;
@@ -349,6 +386,32 @@ static uint32_t NMEA_Scaled(const char *text, uint8_t decimals)
     return value;
 }
 
+static int NMEA_IsUnsignedDecimal(const char *text)
+{
+    uint8_t digits = 0u;
+    uint8_t dots = 0u;
+
+    while (*text != '\0')
+    {
+        if ((*text >= '0') && (*text <= '9'))
+        {
+            digits++;
+        }
+        else if ((*text == '.') && (dots == 0u))
+        {
+            dots++;
+        }
+        else
+        {
+            return 0;
+        }
+
+        text++;
+    }
+
+    return (digits > 0u) ? 1 : 0;
+}
+
 /**
  * @brief Converts "ddmm.mmmm" plus a hemisphere letter to micro-degrees.
  *
@@ -357,37 +420,122 @@ static uint32_t NMEA_Scaled(const char *text, uint8_t decimals)
  * 1e-4 minutes keeps every intermediate result inside 32 bits: the largest
  * value is longitude 18000.0000 -> 180000000.
  */
-static int32_t NMEA_Coordinate(const char *value, char hemisphere)
+static int NMEA_Coordinate(const char *value, char hemisphere,
+                           uint16_t maximum_degrees, int32_t *result)
 {
     uint32_t scaled = NMEA_Scaled(value, 4u);
     uint32_t degrees = scaled / 1000000u;
     uint32_t minutes_e4 = scaled - (degrees * 1000000u);
-    int32_t result;
+    int32_t coordinate;
 
-    result = (int32_t)((degrees * 1000000u) + ((minutes_e4 * 100u) / 60u));
+    if (!NMEA_IsUnsignedDecimal(value) || (minutes_e4 >= 600000u) ||
+        (degrees > maximum_degrees) ||
+        ((degrees == maximum_degrees) && (minutes_e4 != 0u)) ||
+        ((hemisphere != 'N') && (hemisphere != 'S') &&
+         (hemisphere != 'E') && (hemisphere != 'W')))
+    {
+        return 0;
+    }
+
+    coordinate = (int32_t)((degrees * 1000000u) +
+                           ((minutes_e4 * 100u) / 60u));
 
     if ((hemisphere == 'S') || (hemisphere == 'W'))
     {
-        result = -result;
+        coordinate = -coordinate;
     }
 
-    return result;
+    *result = coordinate;
+    return 1;
+}
+
+static int NMEA_ApplyPosition(NMEA_Data *data, const char *sentence,
+                              uint8_t latitude_field,
+                              uint8_t longitude_field)
+{
+    char latitude[NMEA_FIELD_MAX];
+    char latitude_hemisphere[NMEA_FIELD_MAX];
+    char longitude[NMEA_FIELD_MAX];
+    char longitude_hemisphere[NMEA_FIELD_MAX];
+    int32_t latitude_udeg;
+    int32_t longitude_udeg;
+
+    if (!NMEA_Field(sentence, latitude_field, latitude, NMEA_FIELD_MAX) ||
+        !NMEA_Field(sentence, (uint8_t)(latitude_field + 1u),
+                    latitude_hemisphere, NMEA_FIELD_MAX) ||
+        !NMEA_Field(sentence, longitude_field, longitude, NMEA_FIELD_MAX) ||
+        !NMEA_Field(sentence, (uint8_t)(longitude_field + 1u),
+                    longitude_hemisphere, NMEA_FIELD_MAX) ||
+        ((latitude_hemisphere[0] != 'N') &&
+         (latitude_hemisphere[0] != 'S')) ||
+        ((longitude_hemisphere[0] != 'E') &&
+         (longitude_hemisphere[0] != 'W')) ||
+        !NMEA_Coordinate(latitude, latitude_hemisphere[0], 90u,
+                         &latitude_udeg) ||
+        !NMEA_Coordinate(longitude, longitude_hemisphere[0], 180u,
+                         &longitude_udeg))
+    {
+        return 0;
+    }
+
+    data->latitude_udeg = latitude_udeg;
+    data->longitude_udeg = longitude_udeg;
+    return 1;
 }
 
 /**
  * @brief Extracts hh, mm and ss from an "hhmmss.sss" field.
  */
-static void NMEA_ApplyTime(NMEA_Data *data, const char *text)
+static int NMEA_ApplyTime(NMEA_Data *data, const char *text)
 {
     for (uint8_t i = 0u; i < 6u; i++)
     {
         if ((text[i] < '0') || (text[i] > '9'))
         {
-            return;
+            data->time_valid = 0u;
+            return 0;
         }
+    }
+
+    if ((text[0] > '2') || ((text[0] == '2') && (text[1] > '3')) ||
+        (text[2] > '5') || (text[4] > '5'))
+    {
+        data->time_valid = 0u;
+        return 0;
     }
 
     data->utc_hour   = (uint8_t)(((text[0] - '0') * 10) + (text[1] - '0'));
     data->utc_minute = (uint8_t)(((text[2] - '0') * 10) + (text[3] - '0'));
     data->utc_second = (uint8_t)(((text[4] - '0') * 10) + (text[5] - '0'));
+    data->time_valid = 1u;
+    return 1;
+}
+
+static int NMEA_ApplyDate(NMEA_Data *data, const char *text)
+{
+    uint8_t day;
+    uint8_t month;
+    uint8_t year;
+
+    for (uint8_t i = 0u; i < 6u; i++)
+    {
+        if ((text[i] < '0') || (text[i] > '9'))
+        {
+            return 0;
+        }
+    }
+
+    day = (uint8_t)(((text[0] - '0') * 10) + (text[1] - '0'));
+    month = (uint8_t)(((text[2] - '0') * 10) + (text[3] - '0'));
+    year = (uint8_t)(((text[4] - '0') * 10) + (text[5] - '0'));
+
+    if ((day == 0u) || (day > 31u) || (month == 0u) || (month > 12u))
+    {
+        return 0;
+    }
+
+    data->utc_day = day;
+    data->utc_month = month;
+    data->utc_year = (uint16_t)(((year >= 80u) ? 1900u : 2000u) + year);
+    return 1;
 }
