@@ -1,0 +1,19 @@
+# Zeilenenden im Repo immer LF, im Arbeitsverzeichnis wie auf der Plattform
+# ueblich. Verhindert, dass ein Windows-Checkout jede HAL-Datei als geaendert
+# anzeigt.
+* text=auto
+
+*.c   text
+*.h   text
+*.s   text
+*.ld  text
+*.ioc text
+
+# STM32CubeIDE-Projektdateien sind XML, aber vom Werkzeug verwaltet --
+# nicht anfassen lassen.
+*.cproject text eol=lf
+*.project  text eol=lf
+
+*.elf  binary
+*.bin  binary
+*.hex  binary

@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Build output (STM32CubeIDE)
+# ---------------------------------------------------------------------------
+# Erzeugte Artefakte gehoeren nicht ins Repo -- der Debug-Ordner allein
+# ist ~51 MB.
+STM32CubeIDE/Debug/
+STM32CubeIDE/Release/
+
+# Falls spaeter mit dem CubeMX-Makefile oder CMake gebaut wird
+/build/
+/Debug/
+/Release/
+
+# ---------------------------------------------------------------------------
+# Compiler- und Linker-Artefakte
+# ---------------------------------------------------------------------------
+*.o
+*.d
+*.su
+*.cyclo
+*.a
+*.elf
+*.bin
+*.hex
+*.srec
+*.map
+*.list
+*.lss
+
+# ---------------------------------------------------------------------------
+# Eclipse / STM32CubeIDE, maschinenspezifisch
+# ---------------------------------------------------------------------------
+# .project und .cproject werden bewusst NICHT ignoriert -- ohne sie laesst
+# sich das Projekt nicht importieren.
+STM32CubeIDE/.settings/
+.metadata/
+
+# ---------------------------------------------------------------------------
+# CubeMX
+# ---------------------------------------------------------------------------
+# .ioc bleibt versioniert (Quelle der Peripherie-Konfiguration).
+# .mxproject ist nur ein Generierungs-Cache mit absoluten Pfaden.
+.mxproject
+
+# ---------------------------------------------------------------------------
+# Debugger
+# ---------------------------------------------------------------------------
+*.jdebug
+*.jflash
+JLinkLog.txt
+JLinkSettings.ini
+.gdbinit
+
+# ---------------------------------------------------------------------------
+# Betriebssystem / Editoren
+# ---------------------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
