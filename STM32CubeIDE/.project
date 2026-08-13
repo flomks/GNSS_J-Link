@@ -147,6 +147,11 @@
 			<locationURI>PARENT-1-PROJECT_LOC/Core/Src/gnss.c</locationURI>
 		</link>
 		<link>
+			<name>Application/User/Core/nmea.c</name>
+			<type>1</type>
+			<locationURI>PARENT-1-PROJECT_LOC/Core/Src/nmea.c</locationURI>
+		</link>
+		<link>
 			<name>Application/User/Core/gpio.c</name>
 			<type>1</type>
 			<locationURI>PARENT-1-PROJECT_LOC/Core/Src/gpio.c</locationURI>

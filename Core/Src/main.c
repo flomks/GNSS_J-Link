@@ -23,6 +23,7 @@
 
 #include "SEGGER_RTT.h"
 #include "gnss.h"
+#include "nmea.h"
 
 /* USER CODE END Includes */
 
@@ -33,6 +34,22 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/*
+ * ---------------------------------------------------------------------
+ * Output switches -- comment a line out to silence that part of the log.
+ * ---------------------------------------------------------------------
+ * Both are independent. Turning APP_SHOW_RAW_SENTENCES off is the usual
+ * choice once the link works, because the raw dump is what drowns the
+ * decoded status line. Turning APP_SHOW_DECODED_STATUS off gets you the
+ * previous behaviour back.
+ */
+
+/** Dump every received NMEA sentence verbatim ("GNSS> $GPGGA,..."). */
+#define APP_SHOW_RAW_SENTENCES
+
+/** Print the decoded fix/satellites/position line once per second. */
+#define APP_SHOW_DECODED_STATUS
 
 /* USER CODE END PD */
 
@@ -48,6 +65,9 @@
 /* Timestamp of the last heartbeat line */
 static uint32_t last_heartbeat_time = 0;
 
+/* Navigation state accumulated from the incoming sentences */
+static NMEA_Data nmea_data;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -57,6 +77,11 @@ static void MPU_Config(void);
 /* USER CODE BEGIN PFP */
 
 static void GNSS_OnSentence(const char *sentence);
+
+#ifdef APP_SHOW_DECODED_STATUS
+static void App_PrintCoordinate(int32_t micro_degrees, char positive, char negative);
+static void App_PrintDecodedStatus(void);
+#endif
 
 /* USER CODE END PFP */
 
@@ -71,10 +96,123 @@ static void GNSS_OnSentence(const char *sentence);
  */
 static void GNSS_OnSentence(const char *sentence)
 {
+#ifdef APP_SHOW_RAW_SENTENCES
     SEGGER_RTT_WriteString(0, "GNSS> ");
     SEGGER_RTT_WriteString(0, sentence);
     SEGGER_RTT_WriteString(0, "\r\n");
+#endif
+
+#ifdef APP_SHOW_DECODED_STATUS
+    NMEA_Parse(&nmea_data, sentence);
+#endif
+
+#if !defined(APP_SHOW_RAW_SENTENCES) && !defined(APP_SHOW_DECODED_STATUS)
+    (void)sentence;
+#endif
 }
+
+#ifdef APP_SHOW_DECODED_STATUS
+
+/**
+ * @brief Prints micro-degrees as "48.117300 N".
+ *
+ * SEGGER's printf has no %f, so the value is split into whole degrees and
+ * a six-digit fraction. The zero padding is what keeps 48.007° from being
+ * printed as 48.7°.
+ */
+static void App_PrintCoordinate(int32_t micro_degrees, char positive, char negative)
+{
+    uint32_t magnitude;
+    char hemisphere;
+
+    if (micro_degrees < 0)
+    {
+        magnitude = (uint32_t)(-micro_degrees);
+        hemisphere = negative;
+    }
+    else
+    {
+        magnitude = (uint32_t)micro_degrees;
+        hemisphere = positive;
+    }
+
+    SEGGER_RTT_printf(
+        0,
+        "%u.%06u %c",
+        (unsigned)(magnitude / 1000000u),
+        (unsigned)(magnitude % 1000000u),
+        hemisphere
+    );
+}
+
+/**
+ * @brief Prints the decoded navigation state as one line.
+ *
+ * Position and altitude are only shown once a fix actually exists --
+ * printing stale zeros would look like a valid position at Null Island.
+ */
+static void App_PrintDecodedStatus(void)
+{
+    const char *fix_text;
+
+    switch (nmea_data.fix_type)
+    {
+        case NMEA_FIX_2D: fix_text = "2D";   break;
+        case NMEA_FIX_3D: fix_text = "3D";   break;
+        default:          fix_text = "none"; break;
+    }
+
+    SEGGER_RTT_printf(
+        0,
+        "[GNSS] fix=%s | sats=%u/%u | hdop=%u.%03u",
+        fix_text,
+        (unsigned)nmea_data.satellites_used,
+        (unsigned)nmea_data.satellites_visible,
+        (unsigned)(nmea_data.hdop_milli / 1000u),
+        (unsigned)(nmea_data.hdop_milli % 1000u)
+    );
+
+    if ((nmea_data.position_valid != 0u) && (nmea_data.fix_type >= NMEA_FIX_2D))
+    {
+        SEGGER_RTT_WriteString(0, " | ");
+        App_PrintCoordinate(nmea_data.latitude_udeg, 'N', 'S');
+
+        SEGGER_RTT_WriteString(0, " ");
+        App_PrintCoordinate(nmea_data.longitude_udeg, 'E', 'W');
+
+        SEGGER_RTT_printf(
+            0,
+            " | alt=%d.%u m",
+            (int)(nmea_data.altitude_dm / 10),
+            (unsigned)((nmea_data.altitude_dm < 0 ?
+                        -nmea_data.altitude_dm : nmea_data.altitude_dm) % 10)
+        );
+    }
+    else
+    {
+        SEGGER_RTT_WriteString(0, " | no position yet");
+    }
+
+    SEGGER_RTT_printf(
+        0,
+        " | %02u:%02u:%02u UTC%s\r\n",
+        (unsigned)nmea_data.utc_hour,
+        (unsigned)nmea_data.utc_minute,
+        (unsigned)nmea_data.utc_second,
+        (nmea_data.data_valid != 0u) ? "" : " (not valid)"
+    );
+
+    if (nmea_data.checksum_errors != 0u)
+    {
+        SEGGER_RTT_printf(
+            0,
+            "[GNSS] checksum errors: %u\r\n",
+            (unsigned)nmea_data.checksum_errors
+        );
+    }
+}
+
+#endif /* APP_SHOW_DECODED_STATUS */
 
 /* USER CODE END 0 */
 
@@ -148,6 +286,8 @@ int main(void)
 
   last_heartbeat_time = HAL_GetTick();
 
+  NMEA_Reset(&nmea_data);
+
   /*
    * Arm reception. From here on the USART1 interrupt fills the receive
    * ring and the main loop only drains it via GNSS_Poll().
@@ -217,6 +357,10 @@ int main(void)
         }
 
         SEGGER_RTT_WriteString(0, "\r\n");
+
+#ifdef APP_SHOW_DECODED_STATUS
+        App_PrintDecodedStatus();
+#endif
     }
 
   }
