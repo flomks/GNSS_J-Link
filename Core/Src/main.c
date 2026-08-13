@@ -84,6 +84,7 @@ static void GNSS_OnSentence(const char *sentence);
 #if (APP_GNSS_OUTPUT_MODE == APP_GNSS_OUTPUT_PARSED)
 static void App_PrintCoordinate(int32_t micro_degrees, char positive, char negative);
 static void App_PrintAltitude(int32_t decimetres);
+static const char *App_ConstellationName(NMEA_Constellation constellation);
 static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now);
 #endif
 
@@ -114,8 +115,8 @@ static void GNSS_OnSentence(const char *sentence)
  * @brief Prints micro-degrees as "48.117300 N".
  *
  * SEGGER's printf has no %f, so the value is split into whole degrees and
- * a six-digit fraction. The zero padding is what keeps 48.007° from being
- * printed as 48.7°.
+ * a six-digit fraction. The zero padding is what keeps 48.007 degrees from
+ * being printed as 48.7 degrees.
  */
 static void App_PrintCoordinate(int32_t micro_degrees, char positive, char negative)
 {
@@ -164,6 +165,20 @@ static void App_PrintAltitude(int32_t decimetres)
     );
 }
 
+static const char *App_ConstellationName(NMEA_Constellation constellation)
+{
+    switch (constellation)
+    {
+        case NMEA_CONSTELLATION_GPS:     return "GPS";
+        case NMEA_CONSTELLATION_GLONASS: return "GLO";
+        case NMEA_CONSTELLATION_GALILEO: return "GAL";
+        case NMEA_CONSTELLATION_BEIDOU:  return "BDS";
+        case NMEA_CONSTELLATION_QZSS:    return "QZS";
+        case NMEA_CONSTELLATION_NAVIC:   return "NAV";
+        default:                         return "GNSS";
+    }
+}
+
 /**
  * @brief Prints receiver diagnostics and decoded navigation data as a table.
  */
@@ -199,11 +214,11 @@ static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
 
     if ((now - status->last_byte_tick) >= 3000u)
     {
-        nmea_text = "KEINE DATEN";
+        nmea_text = "NO DATA";
     }
     else if ((now - status->last_sentence_tick) >= 3000u)
     {
-        nmea_text = "Bytes, aber keine Saetze";
+        nmea_text = "bytes, but no sentences";
     }
     else
     {
@@ -213,9 +228,9 @@ static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
     SEGGER_RTT_printf(
         0,
         "\r\n--------------------------------------------------\r\n"
-        "[LIVE] STM32 laeuft | %u s\r\n"
-        "UART        : %u Baud | Fehler: %u | Overflow: %u\r\n"
-        "NMEA        : %s | Saetze: %u | CRC-Fehler: %u\r\n",
+        "[LIVE] STM32 running | %u s\r\n"
+        "UART        : %u baud | errors: %u | overflows: %u\r\n"
+        "NMEA        : %s | sentences: %u | CRC errors: %u\r\n",
         (unsigned)(now / 1000u),
         (unsigned)huart1.Init.BaudRate,
         (unsigned)status->uart_errors,
@@ -227,19 +242,28 @@ static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
 
     if (nmea_data.position_valid != 0u)
     {
-        SEGGER_RTT_printf(0, "Fix         : JA (%s, %s)\r\n", fix_text, quality_text);
+        SEGGER_RTT_printf(0, "Fix         : YES (%s, %s)\r\n", fix_text, quality_text);
     }
     else
     {
-        SEGGER_RTT_WriteString(0, "Fix         : NEIN\r\n");
+        SEGGER_RTT_WriteString(0, "Fix         : NO\r\n");
     }
 
     SEGGER_RTT_printf(
-        0,
-        "Satelliten  : %u genutzt | %u sichtbar\r\n",
-        (unsigned)nmea_data.satellites_used,
-        (unsigned)nmea_data.satellites_visible
+        0, "Satellites  : %u used | ",
+        (unsigned)nmea_data.satellites_used
     );
+    if (nmea_data.satellites_visible_valid != 0u)
+    {
+        SEGGER_RTT_printf(
+            0, "%u visible\r\n",
+            (unsigned)nmea_data.satellites_visible
+        );
+    }
+    else
+    {
+        SEGGER_RTT_WriteString(0, "visible count not reported yet\r\n");
+    }
 
     SEGGER_RTT_WriteString(0, "Position     : ");
     if (nmea_data.position_valid != 0u)
@@ -251,10 +275,10 @@ static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
     }
     else
     {
-        SEGGER_RTT_WriteString(0, "noch nicht verfuegbar\r\n");
+        SEGGER_RTT_WriteString(0, "not available yet\r\n");
     }
 
-    SEGGER_RTT_WriteString(0, "Hoehe        : ");
+    SEGGER_RTT_WriteString(0, "Altitude     : ");
     if (nmea_data.altitude_valid != 0u)
     {
         App_PrintAltitude(nmea_data.altitude_dm);
@@ -262,7 +286,7 @@ static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
     }
     else
     {
-        SEGGER_RTT_WriteString(0, "nicht verfuegbar\r\n");
+        SEGGER_RTT_WriteString(0, "not available\r\n");
     }
 
     SEGGER_RTT_printf(
@@ -271,7 +295,7 @@ static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
         (unsigned)((nmea_data.hdop_milli % 1000u) / 10u)
     );
 
-    SEGGER_RTT_WriteString(0, "Geschw.      : ");
+    SEGGER_RTT_WriteString(0, "Speed        : ");
     if (nmea_data.speed_valid != 0u)
     {
         SEGGER_RTT_printf(
@@ -282,21 +306,21 @@ static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
     }
     else
     {
-        SEGGER_RTT_WriteString(0, "nicht verfuegbar\r\n");
+        SEGGER_RTT_WriteString(0, "not available\r\n");
     }
 
-    SEGGER_RTT_WriteString(0, "Kurs         : ");
+    SEGGER_RTT_WriteString(0, "Course       : ");
     if (nmea_data.course_valid != 0u)
     {
         SEGGER_RTT_printf(
-            0, "%u.%02u Grad\r\n",
+            0, "%u.%02u degrees\r\n",
             (unsigned)(nmea_data.course_mdeg / 1000u),
             (unsigned)((nmea_data.course_mdeg % 1000u) / 10u)
         );
     }
     else
     {
-        SEGGER_RTT_WriteString(0, "nicht verfuegbar\r\n");
+        SEGGER_RTT_WriteString(0, "not available\r\n");
     }
 
     SEGGER_RTT_WriteString(0, "UTC          : ");
@@ -314,7 +338,7 @@ static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
         SEGGER_RTT_WriteString(0, "--:--:-- UTC\r\n");
     }
 
-    SEGGER_RTT_WriteString(0, "Datum        : ");
+    SEGGER_RTT_WriteString(0, "Date         : ");
     if (nmea_data.date_valid != 0u)
     {
         SEGGER_RTT_printf(
@@ -327,6 +351,72 @@ static void App_PrintDecodedStatus(const GNSS_Status *status, uint32_t now)
     else
     {
         SEGGER_RTT_WriteString(0, "--.--.----\r\n");
+    }
+
+    SEGGER_RTT_WriteString(0, "\r\nSatellite details:\r\n");
+    if (nmea_data.satellite_count == 0u)
+    {
+        SEGGER_RTT_WriteString(0, "  no GSV/GSA data received yet\r\n");
+    }
+    else
+    {
+        uint8_t printed = 0u;
+
+        for (uint8_t i = 0u; i < nmea_data.satellite_count; i++)
+        {
+            const NMEA_Satellite *satellite = &nmea_data.satellites[i];
+
+            if ((satellite->visible == 0u) && (satellite->used == 0u))
+            {
+                continue;
+            }
+
+            SEGGER_RTT_printf(
+                0, "  %s %03u | elev=",
+                App_ConstellationName(satellite->constellation),
+                (unsigned)satellite->svid
+            );
+
+            if (satellite->elevation_valid != 0u)
+            {
+                SEGGER_RTT_printf(0, "%02u", (unsigned)satellite->elevation_deg);
+            }
+            else
+            {
+                SEGGER_RTT_WriteString(0, "--");
+            }
+
+            SEGGER_RTT_WriteString(0, " | az=");
+            if (satellite->azimuth_valid != 0u)
+            {
+                SEGGER_RTT_printf(0, "%03u", (unsigned)satellite->azimuth_deg);
+            }
+            else
+            {
+                SEGGER_RTT_WriteString(0, "---");
+            }
+
+            SEGGER_RTT_WriteString(0, " | SNR=");
+            if (satellite->snr_valid != 0u)
+            {
+                SEGGER_RTT_printf(0, "%02u dB-Hz", (unsigned)satellite->snr_dbhz);
+            }
+            else
+            {
+                SEGGER_RTT_WriteString(0, "-- dB-Hz");
+            }
+
+            SEGGER_RTT_printf(
+                0, " | %s\r\n",
+                (satellite->used != 0u) ? "USED" : "visible"
+            );
+            printed++;
+        }
+
+        if (printed == 0u)
+        {
+            SEGGER_RTT_WriteString(0, "  no satellites currently visible\r\n");
+        }
     }
 
     SEGGER_RTT_WriteString(0, "--------------------------------------------------\r\n");
@@ -557,7 +647,7 @@ void Error_Handler(void)
       0,
       "\r\n"
       "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\r\n"
-      "[FATAL] Error_Handler() aufgerufen!\r\n"
+      "[FATAL] Error_Handler() called!\r\n"
       "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\r\n"
   );
 

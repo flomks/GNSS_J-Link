@@ -32,6 +32,17 @@ static int      NMEA_ApplyPosition(NMEA_Data *data, const char *sentence,
                                    uint8_t longitude_field);
 static int      NMEA_ApplyTime(NMEA_Data *data, const char *text);
 static int      NMEA_ApplyDate(NMEA_Data *data, const char *text);
+static NMEA_Constellation NMEA_TalkerConstellation(const char *sentence);
+static NMEA_Constellation NMEA_SystemConstellation(uint32_t system_id);
+static NMEA_Constellation NMEA_DetectConstellation(uint16_t svid);
+static NMEA_Satellite *NMEA_FindOrAddSatellite(
+    NMEA_Data *data, NMEA_Constellation constellation, uint16_t svid);
+static void     NMEA_ClearVisible(NMEA_Data *data,
+                                  NMEA_Constellation constellation);
+static void     NMEA_ClearUsed(NMEA_Data *data,
+                               NMEA_Constellation constellation);
+static void     NMEA_UpdateReportedVisible(
+    NMEA_Data *data, NMEA_Constellation constellation, uint8_t total);
 
 /* Public functions ----------------------------------------------------------*/
 
@@ -53,6 +64,7 @@ void NMEA_Reset(NMEA_Data *data)
     data->fix_quality = 0u;
     data->satellites_used = 0u;
     data->satellites_visible = 0u;
+    data->satellites_visible_valid = 0u;
     data->hdop_milli = 0u;
     data->latitude_udeg = 0;
     data->longitude_udeg = 0;
@@ -65,9 +77,29 @@ void NMEA_Reset(NMEA_Data *data)
     data->utc_year = 0u;
     data->speed_kmh_milli = 0u;
     data->course_mdeg = 0u;
+    data->satellite_count = 0u;
     data->sentences_parsed = 0u;
     data->checksum_errors = 0u;
     data->sentences_ignored = 0u;
+
+    for (uint8_t i = 0u; i < 7u; i++)
+    {
+        data->satellites_visible_by_constellation[i] = 0u;
+    }
+
+    for (uint8_t i = 0u; i < NMEA_MAX_SATELLITES; i++)
+    {
+        data->satellites[i].svid = 0u;
+        data->satellites[i].azimuth_deg = 0u;
+        data->satellites[i].elevation_deg = 0u;
+        data->satellites[i].snr_dbhz = 0u;
+        data->satellites[i].constellation = NMEA_CONSTELLATION_UNKNOWN;
+        data->satellites[i].elevation_valid = 0u;
+        data->satellites[i].azimuth_valid = 0u;
+        data->satellites[i].snr_valid = 0u;
+        data->satellites[i].visible = 0u;
+        data->satellites[i].used = 0u;
+    }
 }
 
 int NMEA_Parse(NMEA_Data *data, const char *sentence)
@@ -156,10 +188,46 @@ int NMEA_Parse(NMEA_Data *data, const char *sentence)
     /* ---------------------------------------------------------------- */
     if ((type[0] == 'G') && (type[1] == 'S') && (type[2] == 'A'))
     {
-        data->data_valid = 0u;
+        NMEA_Constellation constellation = NMEA_TalkerConstellation(sentence);
+
         if (NMEA_Field(sentence, 2u, field, NMEA_FIELD_MAX))
         {
             data->fix_type = (uint8_t)NMEA_Scaled(field, 0u);
+        }
+
+        /* NMEA 4.x optionally appends a GNSS system ID after VDOP. */
+        if (NMEA_Field(sentence, 18u, field, NMEA_FIELD_MAX) &&
+            NMEA_IsUnsignedDecimal(field))
+        {
+            constellation = NMEA_SystemConstellation(NMEA_Scaled(field, 0u));
+        }
+
+        NMEA_ClearUsed(data, constellation);
+
+        for (uint8_t index = 3u; index <= 14u; index++)
+        {
+            NMEA_Constellation satellite_constellation = constellation;
+            NMEA_Satellite *satellite;
+            uint16_t svid;
+
+            if (!NMEA_Field(sentence, index, field, NMEA_FIELD_MAX) ||
+                !NMEA_IsUnsignedDecimal(field))
+            {
+                continue;
+            }
+
+            svid = (uint16_t)NMEA_Scaled(field, 0u);
+            if (satellite_constellation == NMEA_CONSTELLATION_UNKNOWN)
+            {
+                satellite_constellation = NMEA_DetectConstellation(svid);
+            }
+
+            satellite = NMEA_FindOrAddSatellite(
+                data, satellite_constellation, svid);
+            if (satellite != NULL)
+            {
+                satellite->used = 1u;
+            }
         }
 
         data->sentences_parsed++;
@@ -167,15 +235,100 @@ int NMEA_Parse(NMEA_Data *data, const char *sentence)
     }
 
     /* ---------------------------------------------------------------- */
-    /* GSV -- satellites in view. Field 3 repeats in every GSV of the    */
-    /* group, so reading only the first one would be enough; taking it   */
-    /* from each is harmless and simpler.                                */
+    /* GSV -- visible satellites, four records per sentence.             */
     /* ---------------------------------------------------------------- */
     if ((type[0] == 'G') && (type[1] == 'S') && (type[2] == 'V'))
     {
-        if (NMEA_Field(sentence, 3u, field, NMEA_FIELD_MAX))
+        NMEA_Constellation constellation = NMEA_TalkerConstellation(sentence);
+        uint8_t message_number = 0u;
+        uint8_t reported_visible = 0u;
+
+        if (NMEA_Field(sentence, 2u, field, NMEA_FIELD_MAX) &&
+            NMEA_IsUnsignedDecimal(field))
         {
-            data->satellites_visible = (uint8_t)NMEA_Scaled(field, 0u);
+            message_number = (uint8_t)NMEA_Scaled(field, 0u);
+        }
+
+        if (NMEA_Field(sentence, 3u, field, NMEA_FIELD_MAX) &&
+            NMEA_IsUnsignedDecimal(field))
+        {
+            reported_visible = (uint8_t)NMEA_Scaled(field, 0u);
+            NMEA_UpdateReportedVisible(data, constellation, reported_visible);
+        }
+
+        /* Message 1 starts a fresh visibility cycle for this system. */
+        if (message_number == 1u)
+        {
+            NMEA_ClearVisible(data, constellation);
+        }
+
+        for (uint8_t slot = 0u; slot < 4u; slot++)
+        {
+            uint8_t base = (uint8_t)(4u + (slot * 4u));
+            NMEA_Constellation satellite_constellation = constellation;
+            NMEA_Satellite *satellite;
+            uint16_t svid;
+            uint32_t value;
+
+            if (!NMEA_Field(sentence, base, field, NMEA_FIELD_MAX) ||
+                !NMEA_IsUnsignedDecimal(field))
+            {
+                continue;
+            }
+
+            svid = (uint16_t)NMEA_Scaled(field, 0u);
+            if (satellite_constellation == NMEA_CONSTELLATION_UNKNOWN)
+            {
+                satellite_constellation = NMEA_DetectConstellation(svid);
+            }
+
+            satellite = NMEA_FindOrAddSatellite(
+                data, satellite_constellation, svid);
+            if (satellite == NULL)
+            {
+                continue;
+            }
+
+            satellite->visible = 1u;
+            satellite->elevation_valid = 0u;
+            satellite->azimuth_valid = 0u;
+            satellite->snr_valid = 0u;
+
+            if (NMEA_Field(sentence, (uint8_t)(base + 1u),
+                           field, NMEA_FIELD_MAX) &&
+                NMEA_IsUnsignedDecimal(field))
+            {
+                value = NMEA_Scaled(field, 0u);
+                if (value <= 90u)
+                {
+                    satellite->elevation_deg = (uint8_t)value;
+                    satellite->elevation_valid = 1u;
+                }
+            }
+
+            if (NMEA_Field(sentence, (uint8_t)(base + 2u),
+                           field, NMEA_FIELD_MAX) &&
+                NMEA_IsUnsignedDecimal(field))
+            {
+                value = NMEA_Scaled(field, 0u);
+                if (value <= 359u)
+                {
+                    satellite->azimuth_deg = (uint16_t)value;
+                    satellite->azimuth_valid = 1u;
+                }
+            }
+
+            if (NMEA_Field(sentence, (uint8_t)(base + 3u),
+                           field, NMEA_FIELD_MAX) &&
+                NMEA_IsUnsignedDecimal(field))
+            {
+                value = NMEA_Scaled(field, 0u);
+                if (value <= 255u)
+                {
+                    satellite->snr_dbhz = (uint8_t)value;
+                    satellite->snr_valid = 1u;
+                }
+            }
         }
 
         data->sentences_parsed++;
@@ -192,6 +345,7 @@ int NMEA_Parse(NMEA_Data *data, const char *sentence)
             NMEA_ApplyTime(data, field);
         }
 
+        data->data_valid = 0u;
         if (NMEA_Field(sentence, 2u, field, NMEA_FIELD_MAX))
         {
             data->data_valid = (field[0] == 'A') ? 1u : 0u;
@@ -538,4 +692,162 @@ static int NMEA_ApplyDate(NMEA_Data *data, const char *text)
     data->utc_month = month;
     data->utc_year = (uint16_t)(((year >= 80u) ? 1900u : 2000u) + year);
     return 1;
+}
+
+static NMEA_Constellation NMEA_TalkerConstellation(const char *sentence)
+{
+    if ((sentence[1] == 'G') && (sentence[2] == 'P'))
+    {
+        return NMEA_CONSTELLATION_GPS;
+    }
+    if ((sentence[1] == 'G') && (sentence[2] == 'L'))
+    {
+        return NMEA_CONSTELLATION_GLONASS;
+    }
+    if ((sentence[1] == 'G') && (sentence[2] == 'A'))
+    {
+        return NMEA_CONSTELLATION_GALILEO;
+    }
+    if (((sentence[1] == 'G') && (sentence[2] == 'B')) ||
+        ((sentence[1] == 'B') && (sentence[2] == 'D')))
+    {
+        return NMEA_CONSTELLATION_BEIDOU;
+    }
+    if ((sentence[1] == 'G') && (sentence[2] == 'Q'))
+    {
+        return NMEA_CONSTELLATION_QZSS;
+    }
+    if ((sentence[1] == 'G') && (sentence[2] == 'I'))
+    {
+        return NMEA_CONSTELLATION_NAVIC;
+    }
+
+    /* GN is a combined talker; the individual SVID must identify it. */
+    return NMEA_CONSTELLATION_UNKNOWN;
+}
+
+static NMEA_Constellation NMEA_SystemConstellation(uint32_t system_id)
+{
+    switch (system_id)
+    {
+        case 1u: return NMEA_CONSTELLATION_GPS;
+        case 2u: return NMEA_CONSTELLATION_GLONASS;
+        case 3u: return NMEA_CONSTELLATION_GALILEO;
+        case 4u: return NMEA_CONSTELLATION_BEIDOU;
+        case 5u: return NMEA_CONSTELLATION_QZSS;
+        case 6u: return NMEA_CONSTELLATION_NAVIC;
+        default: return NMEA_CONSTELLATION_UNKNOWN;
+    }
+}
+
+static NMEA_Constellation NMEA_DetectConstellation(uint16_t svid)
+{
+    if ((svid >= 1u) && (svid <= 32u))
+    {
+        return NMEA_CONSTELLATION_GPS;
+    }
+    if ((svid >= 65u) && (svid <= 96u))
+    {
+        return NMEA_CONSTELLATION_GLONASS;
+    }
+    if ((svid >= 193u) && (svid <= 200u))
+    {
+        return NMEA_CONSTELLATION_QZSS;
+    }
+    if ((svid >= 201u) && (svid <= 237u))
+    {
+        return NMEA_CONSTELLATION_BEIDOU;
+    }
+    if ((svid >= 301u) && (svid <= 336u))
+    {
+        return NMEA_CONSTELLATION_GALILEO;
+    }
+    if ((svid >= 401u) && (svid <= 414u))
+    {
+        return NMEA_CONSTELLATION_NAVIC;
+    }
+
+    return NMEA_CONSTELLATION_UNKNOWN;
+}
+
+static NMEA_Satellite *NMEA_FindOrAddSatellite(
+    NMEA_Data *data, NMEA_Constellation constellation, uint16_t svid)
+{
+    for (uint8_t i = 0u; i < data->satellite_count; i++)
+    {
+        NMEA_Satellite *satellite = &data->satellites[i];
+
+        if ((satellite->constellation == constellation) &&
+            (satellite->svid == svid))
+        {
+            return satellite;
+        }
+    }
+
+    if (data->satellite_count >= NMEA_MAX_SATELLITES)
+    {
+        return NULL;
+    }
+
+    NMEA_Satellite *satellite = &data->satellites[data->satellite_count++];
+    satellite->svid = svid;
+    satellite->azimuth_deg = 0u;
+    satellite->elevation_deg = 0u;
+    satellite->snr_dbhz = 0u;
+    satellite->constellation = constellation;
+    satellite->elevation_valid = 0u;
+    satellite->azimuth_valid = 0u;
+    satellite->snr_valid = 0u;
+    satellite->visible = 0u;
+    satellite->used = 0u;
+    return satellite;
+}
+
+static void NMEA_ClearVisible(NMEA_Data *data,
+                              NMEA_Constellation constellation)
+{
+    for (uint8_t i = 0u; i < data->satellite_count; i++)
+    {
+        if ((constellation == NMEA_CONSTELLATION_UNKNOWN) ||
+            (data->satellites[i].constellation == constellation))
+        {
+            data->satellites[i].visible = 0u;
+        }
+    }
+}
+
+static void NMEA_ClearUsed(NMEA_Data *data,
+                           NMEA_Constellation constellation)
+{
+    for (uint8_t i = 0u; i < data->satellite_count; i++)
+    {
+        if ((constellation == NMEA_CONSTELLATION_UNKNOWN) ||
+            (data->satellites[i].constellation == constellation))
+        {
+            data->satellites[i].used = 0u;
+        }
+    }
+}
+
+static void NMEA_UpdateReportedVisible(
+    NMEA_Data *data, NMEA_Constellation constellation, uint8_t total)
+{
+    if (constellation == NMEA_CONSTELLATION_UNKNOWN)
+    {
+        data->satellites_visible_by_constellation[0] = total;
+        data->satellites_visible = total;
+        data->satellites_visible_valid = 1u;
+        return;
+    }
+
+    data->satellites_visible_by_constellation[(uint8_t)constellation] = total;
+
+    uint16_t sum = 0u;
+    for (uint8_t i = 1u; i < 7u; i++)
+    {
+        sum += data->satellites_visible_by_constellation[i];
+    }
+
+    data->satellites_visible = (sum > 255u) ? 255u : (uint8_t)sum;
+    data->satellites_visible_valid = 1u;
 }

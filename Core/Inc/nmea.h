@@ -37,6 +37,44 @@ extern "C" {
 #define NMEA_FIX_2D   2u
 #define NMEA_FIX_3D   3u
 
+/** Maximum number of satellite records retained at once. */
+#define NMEA_MAX_SATELLITES 64u
+
+typedef enum
+{
+    NMEA_CONSTELLATION_UNKNOWN = 0,
+    NMEA_CONSTELLATION_GPS,
+    NMEA_CONSTELLATION_GLONASS,
+    NMEA_CONSTELLATION_GALILEO,
+    NMEA_CONSTELLATION_BEIDOU,
+    NMEA_CONSTELLATION_QZSS,
+    NMEA_CONSTELLATION_NAVIC
+} NMEA_Constellation;
+
+typedef struct
+{
+    /** Satellite vehicle identifier/PRN as transmitted by the receiver. */
+    uint16_t svid;
+
+    /** Azimuth clockwise from true north, 0..359 degrees. */
+    uint16_t azimuth_deg;
+
+    /** Elevation above the horizon, 0..90 degrees. */
+    uint8_t elevation_deg;
+
+    /** Carrier-to-noise ratio in dB-Hz, if snr_valid is set. */
+    uint8_t snr_dbhz;
+
+    NMEA_Constellation constellation;
+
+    /** Measurement and state validity flags. */
+    uint8_t elevation_valid;
+    uint8_t azimuth_valid;
+    uint8_t snr_valid;
+    uint8_t visible;
+    uint8_t used;
+} NMEA_Satellite;
+
 /**
  * @brief Decoded navigation state, accumulated across sentences.
  *
@@ -71,8 +109,14 @@ typedef struct
     /** Satellites used in the solution, from GGA. */
     uint8_t satellites_used;
 
-    /** Satellites in view, from GSV. */
+    /** Total satellites in view as reported directly by GSV. */
     uint8_t satellites_visible;
+
+    /** 1 after at least one valid GSV total has been received. */
+    uint8_t satellites_visible_valid;
+
+    /** Per-constellation GSV totals; index uses NMEA_Constellation. */
+    uint8_t satellites_visible_by_constellation[7];
 
     /** Horizontal dilution of precision, x1000 (1234 == 1.234). */
     uint16_t hdop_milli;
@@ -101,6 +145,10 @@ typedef struct
 
     /** Course over ground in degrees x1000 (271250 == 271.250 degrees). */
     uint32_t course_mdeg;
+
+    /** Satellite records accumulated from GSV and usage flags from GSA. */
+    NMEA_Satellite satellites[NMEA_MAX_SATELLITES];
+    uint8_t satellite_count;
 
     /** Sentences successfully decoded. */
     uint32_t sentences_parsed;
